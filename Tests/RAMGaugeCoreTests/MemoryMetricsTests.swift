@@ -24,3 +24,17 @@ final class MemoryMetricsTests: XCTestCase {
         XCTAssertEqual(snapshot.usagePercent, 100)
     }
 }
+
+final class AppVersionTests: XCTestCase {
+    func testNewerVersionsDetected() {
+        XCTAssertTrue(AppVersion.isNewer("v1.2.0", than: "1.1.0"))
+        XCTAssertTrue(AppVersion.isNewer("2.0.0", than: "1.9.9"))
+        XCTAssertTrue(AppVersion.isNewer("1.1.1", than: "1.1"))
+    }
+
+    func testSameOrOlderVersionsIgnored() {
+        XCTAssertFalse(AppVersion.isNewer("v1.1.0", than: "1.1.0"))
+        XCTAssertFalse(AppVersion.isNewer("1.0.9", than: "1.1.0"))
+        XCTAssertFalse(AppVersion.isNewer("1.1", than: "1.1.0"))
+    }
+}

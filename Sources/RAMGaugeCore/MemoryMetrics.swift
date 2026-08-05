@@ -1,5 +1,23 @@
 import Foundation
 
+public enum AppVersion {
+    /// Compares dotted numeric versions like "1.2.0"; ignores a leading "v".
+    public static func isNewer(_ candidate: String, than current: String) -> Bool {
+        func components(_ version: String) -> [Int] {
+            let trimmed = version.hasPrefix("v") ? String(version.dropFirst()) : version
+            return trimmed.split(separator: ".").map { Int($0) ?? 0 }
+        }
+        let a = components(candidate)
+        let b = components(current)
+        for index in 0..<max(a.count, b.count) {
+            let x = index < a.count ? a[index] : 0
+            let y = index < b.count ? b[index] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+}
+
 public enum MemoryPressure: Equatable, Sendable {
     case normal
     case warning

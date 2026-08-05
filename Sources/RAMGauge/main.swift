@@ -200,8 +200,42 @@ final class MemoryMonitor: ObservableObject {
     }
 }
 
+@MainActor
+final class UpdateChecker: ObservableObject {
+    /// Set only when a release newer than the running version exists.
+    @Published private(set) var availableVersion: String?
+
+    static let releasesPage = URL(string: "https://github.com/dawsbot/ram-gauge/releases/latest")!
+    private static let latestAPI = URL(string: "https://api.github.com/repos/dawsbot/ram-gauge/releases/latest")!
+
+    private var timer: Timer?
+
+    init() {
+        check()
+        timer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.check() }
+        }
+    }
+
+    func check() {
+        var request = URLRequest(url: Self.latestAPI)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        Task { [weak self] in
+            guard let (data, _) = try? await URLSession.shared.data(for: request),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String else { return }
+            let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+            let newer = AppVersion.isNewer(tag, than: current)
+            await MainActor.run {
+                self?.availableVersion = newer ? (tag.hasPrefix("v") ? String(tag.dropFirst()) : tag) : nil
+            }
+        }
+    }
+}
+
 struct MemoryMenuView: View {
     @ObservedObject var monitor: MemoryMonitor
+    @ObservedObject var updater: UpdateChecker
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -248,6 +282,16 @@ struct MemoryMenuView: View {
                     }
                 }
             }
+            if let version = updater.availableVersion {
+                Divider()
+                Button {
+                    NSWorkspace.shared.open(UpdateChecker.releasesPage)
+                } label: {
+                    Label("Update available: v\(version)", systemImage: "arrow.down.circle.fill")
+                        .foregroundStyle(.blue)
+                }
+                .buttonStyle(.plain)
+            }
             Divider()
             Button("Refresh now") { monitor.refresh() }
             Button("Quit RAM Gauge") { NSApplication.shared.terminate(nil) }
@@ -276,10 +320,11 @@ struct MemoryMenuView: View {
 @main
 struct RAMGaugeApp: App {
     @StateObject private var monitor = MemoryMonitor()
+    @StateObject private var updater = UpdateChecker()
 
     var body: some Scene {
         MenuBarExtra {
-            MemoryMenuView(monitor: monitor)
+            MemoryMenuView(monitor: monitor, updater: updater)
         } label: {
             Text("💻 \(monitor.snapshot.usagePercent)%")
                 .foregroundStyle(menuBarColor)
