@@ -423,6 +423,12 @@ struct RAMGaugeApp: App {
 
     init() {
         Notifier.requestPermission()
+        // Enable launch at login on first run only, so unchecking it sticks.
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: "didDefaultLaunchAtLogin") {
+            try? SMAppService.mainApp.register()
+            defaults.set(true, forKey: "didDefaultLaunchAtLogin")
+        }
     }
 
     var body: some Scene {
