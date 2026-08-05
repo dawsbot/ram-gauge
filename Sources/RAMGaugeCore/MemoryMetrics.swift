@@ -34,11 +34,13 @@ public struct MemorySnapshot: Equatable, Sendable {
     public let totalBytes: UInt64
     public let usedBytes: UInt64
     public let pressure: MemoryPressure
+    public let swapUsedBytes: UInt64
 
-    public init(totalBytes: UInt64, usedBytes: UInt64, pressure: MemoryPressure) {
+    public init(totalBytes: UInt64, usedBytes: UInt64, pressure: MemoryPressure, swapUsedBytes: UInt64 = 0) {
         self.totalBytes = totalBytes
         self.usedBytes = usedBytes
         self.pressure = pressure
+        self.swapUsedBytes = swapUsedBytes
     }
 
     public var usageRatio: Double {

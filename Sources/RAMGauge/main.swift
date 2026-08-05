@@ -2,7 +2,9 @@ import AppKit
 import Combine
 import Darwin
 import RAMGaugeCore
+import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 struct ProcessMemoryInfo: Identifiable, Equatable {
     let pid: pid_t
@@ -15,6 +17,9 @@ struct ProcessMemoryInfo: Identifiable, Equatable {
 final class MemoryMonitor: ObservableObject {
     @Published private(set) var snapshot: MemorySnapshot
     @Published private(set) var topProcesses: [ProcessMemoryInfo] = []
+    /// Usage ratios sampled every refresh; last 10 minutes at 5s cadence.
+    @Published private(set) var history: [Double] = []
+    private static let historyLimit = 120
 
     private var timer: Timer?
     private var pressureSource: DispatchSourceMemoryPressure?
@@ -35,6 +40,7 @@ final class MemoryMonitor: ObservableObject {
         source.setEventHandler { [weak self, weak source] in
             guard let self, let source else { return }
             let event = source.data
+            let previous = self.pressure
             if event.contains(.critical) {
                 self.pressure = .critical
             } else if event.contains(.warning) {
@@ -43,6 +49,9 @@ final class MemoryMonitor: ObservableObject {
                 self.pressure = .normal
             }
             self.refresh()
+            if self.pressure != previous, self.pressure != .normal {
+                Notifier.postPressureAlert(level: self.pressure, top: self.topProcesses.first)
+            }
         }
         source.resume()
         pressureSource = source
@@ -51,6 +60,10 @@ final class MemoryMonitor: ObservableObject {
     func refresh() {
         snapshot = Self.readSnapshot(pressure: pressure)
         topProcesses = Self.readTopProcesses()
+        history.append(snapshot.usageRatio)
+        if history.count > Self.historyLimit {
+            history.removeFirst(history.count - Self.historyLimit)
+        }
     }
 
     func kill(_ process: ProcessMemoryInfo) {
@@ -186,8 +199,9 @@ final class MemoryMonitor: ObservableObject {
         }
 
         let total = ProcessInfo.processInfo.physicalMemory
+        let swapUsed = readSwapUsed()
         guard result == KERN_SUCCESS else {
-            return MemorySnapshot(totalBytes: total, usedBytes: 0, pressure: .normal)
+            return MemorySnapshot(totalBytes: total, usedBytes: 0, pressure: .normal, swapUsedBytes: swapUsed)
         }
 
         let pageSize = UInt64(getpagesize())
@@ -196,7 +210,64 @@ final class MemoryMonitor: ObservableObject {
         // which macOS intentionally keeps large.
         let appPages = UInt64(stats.internal_page_count) - min(UInt64(stats.internal_page_count), UInt64(stats.purgeable_count))
         let usedPages = appPages + UInt64(stats.wire_count) + UInt64(stats.compressor_page_count)
-        return MemorySnapshot(totalBytes: total, usedBytes: usedPages * pageSize, pressure: pressure)
+        return MemorySnapshot(totalBytes: total, usedBytes: usedPages * pageSize, pressure: pressure, swapUsedBytes: swapUsed)
+    }
+
+    private static func readSwapUsed() -> UInt64 {
+        var swap = xsw_usage()
+        var size = MemoryLayout<xsw_usage>.stride
+        guard sysctlbyname("vm.swapusage", &swap, &size, nil, 0) == 0 else { return 0 }
+        return swap.xsu_used
+    }
+}
+
+enum Notifier {
+    static func requestPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    static func postPressureAlert(level: MemoryPressure, top: ProcessMemoryInfo?) {
+        let content = UNMutableNotificationContent()
+        content.title = level == .critical ? "Memory pressure critical" : "Memory pressure elevated"
+        if let top {
+            let size = ByteCountFormatter.string(fromByteCount: Int64(top.bytes), countStyle: .memory)
+            content.body = "Biggest consumer: \(top.name) at \(size). Click the gauge to review or kill processes."
+        } else {
+            content.body = "Click the gauge in the menu bar to review memory use."
+        }
+        content.sound = level == .critical ? .default : nil
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+}
+
+struct Sparkline: View {
+    let values: [Double]  // 0...1, oldest first, fixed 0-100% scale
+    let color: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let height = geo.size.height
+            let step = values.count > 1 ? width / CGFloat(values.count - 1) : width
+            let points = values.enumerated().map { index, value in
+                CGPoint(x: CGFloat(index) * step, y: height * (1 - CGFloat(value)))
+            }
+            if let first = points.first, let last = points.last {
+                Path { path in
+                    path.move(to: CGPoint(x: first.x, y: height))
+                    points.forEach { path.addLine(to: $0) }
+                    path.addLine(to: CGPoint(x: last.x, y: height))
+                    path.closeSubpath()
+                }
+                .fill(color.opacity(0.12))
+                Path { path in
+                    path.move(to: first)
+                    points.dropFirst().forEach { path.addLine(to: $0) }
+                }
+                .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            }
+        }
     }
 }
 
@@ -236,6 +307,7 @@ final class UpdateChecker: ObservableObject {
 struct MemoryMenuView: View {
     @ObservedObject var monitor: MemoryMonitor
     @ObservedObject var updater: UpdateChecker
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -250,9 +322,23 @@ struct MemoryMenuView: View {
             }
             ProgressView(value: monitor.snapshot.usageRatio)
                 .tint(color)
+            if monitor.history.count >= 2 {
+                VStack(alignment: .leading, spacing: 2) {
+                    Sparkline(values: monitor.history, color: color)
+                        .frame(height: 28)
+                    Text("Last 10 minutes")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
             Text("\(ByteCountFormatter.string(fromByteCount: Int64(monitor.snapshot.usedBytes), countStyle: .memory)) of \(ByteCountFormatter.string(fromByteCount: Int64(monitor.snapshot.totalBytes), countStyle: .memory))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if monitor.snapshot.swapUsedBytes > 0 {
+                Text("Swap used: \(ByteCountFormatter.string(fromByteCount: Int64(monitor.snapshot.swapUsedBytes), countStyle: .memory))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Text(statusText)
                 .font(.caption)
                 .foregroundStyle(color)
@@ -293,6 +379,19 @@ struct MemoryMenuView: View {
                 .buttonStyle(.plain)
             }
             Divider()
+            Toggle("Launch at login", isOn: $launchAtLogin)
+                .toggleStyle(.checkbox)
+                .onChange(of: launchAtLogin) { _, enabled in
+                    do {
+                        if enabled {
+                            try SMAppService.mainApp.register()
+                        } else {
+                            try SMAppService.mainApp.unregister()
+                        }
+                    } catch {
+                        launchAtLogin = SMAppService.mainApp.status == .enabled
+                    }
+                }
             Button("Refresh now") { monitor.refresh() }
             Button("Quit RAM Gauge") { NSApplication.shared.terminate(nil) }
         }
@@ -321,6 +420,10 @@ struct MemoryMenuView: View {
 struct RAMGaugeApp: App {
     @StateObject private var monitor = MemoryMonitor()
     @StateObject private var updater = UpdateChecker()
+
+    init() {
+        Notifier.requestPermission()
+    }
 
     var body: some Scene {
         MenuBarExtra {
