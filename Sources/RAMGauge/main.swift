@@ -4,12 +4,21 @@ import Darwin
 import RAMGaugeCore
 import SwiftUI
 
+struct ProcessMemoryInfo: Identifiable, Equatable {
+    let pid: pid_t
+    let name: String
+    let bytes: UInt64
+    var id: pid_t { pid }
+}
+
 @MainActor
 final class MemoryMonitor: ObservableObject {
     @Published private(set) var snapshot: MemorySnapshot
+    @Published private(set) var topProcesses: [ProcessMemoryInfo] = []
 
     private var timer: Timer?
     private var pressureSource: DispatchSourceMemoryPressure?
+    private var pressure: MemoryPressure = .normal
 
     init() {
         snapshot = MemoryMonitor.readSnapshot()
@@ -22,20 +31,152 @@ final class MemoryMonitor: ObservableObject {
             Task { @MainActor in self?.refresh() }
         }
 
-        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.normal, .warning, .critical], queue: .main)
         source.setEventHandler { [weak self, weak source] in
             guard let self, let source else { return }
-            self.refresh(pressureEvent: source.data)
+            let event = source.data
+            if event.contains(.critical) {
+                self.pressure = .critical
+            } else if event.contains(.warning) {
+                self.pressure = .warning
+            } else if event.contains(.normal) {
+                self.pressure = .normal
+            }
+            self.refresh()
         }
         source.resume()
         pressureSource = source
     }
 
-    func refresh(pressureEvent: DispatchSource.MemoryPressureEvent = []) {
-        snapshot = Self.readSnapshot(pressureEvent: pressureEvent)
+    func refresh() {
+        snapshot = Self.readSnapshot(pressure: pressure)
+        topProcesses = Self.readTopProcesses()
     }
 
-    private static func readSnapshot(pressureEvent: DispatchSource.MemoryPressureEvent = []) -> MemorySnapshot {
+    func kill(_ process: ProcessMemoryInfo) {
+        Darwin.kill(process.pid, SIGKILL)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.refresh()
+        }
+    }
+
+    private static func readTopProcesses(limit: Int = 5) -> [ProcessMemoryInfo] {
+        var pids = [pid_t](repeating: 0, count: 8192)
+        let bytesReturned = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.stride))
+        guard bytesReturned > 0 else { return [] }
+        let count = Int(bytesReturned)
+
+        var results: [ProcessMemoryInfo] = []
+        for pid in pids.prefix(count) where pid > 0 {
+            var usage = rusage_info_current()
+            let status = withUnsafeMutablePointer(to: &usage) {
+                $0.withMemoryRebound(to: (rusage_info_t?).self, capacity: 1) {
+                    proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+                }
+            }
+            // Fails for other users' processes; skip those.
+            guard status == 0, usage.ri_phys_footprint > 0 else { continue }
+
+            var nameBuffer = [UInt8](repeating: 0, count: 2 * Int(MAXCOMLEN) + 1)
+            proc_name(pid, &nameBuffer, UInt32(nameBuffer.count))
+            let rawName = String(decoding: nameBuffer.prefix(while: { $0 != 0 }), as: UTF8.self)
+            guard !rawName.isEmpty else { continue }
+
+            results.append(ProcessMemoryInfo(pid: pid, name: friendlyName(pid: pid, fallback: rawName), bytes: usage.ri_phys_footprint))
+        }
+        return Array(results.sorted { $0.bytes > $1.bytes }.prefix(limit))
+    }
+
+    private static func friendlyName(pid: pid_t, fallback: String) -> String {
+        if let app = NSRunningApplication(processIdentifier: pid), let name = app.localizedName {
+            return name
+        }
+
+        var pathBuffer = [UInt8](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        var executable = fallback
+        var path = ""
+        if proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count)) > 0 {
+            path = String(decoding: pathBuffer.prefix(while: { $0 != 0 }), as: UTF8.self)
+            executable = URL(fileURLWithPath: path).lastPathComponent
+        }
+
+        // Script runtimes: name them by the tool they run and the project directory.
+        let runtimes: Set<String> = ["node", "bun", "deno", "python", "python3", "ruby"]
+        if runtimes.contains(executable) || fallback.hasPrefix("next-server") {
+            let args = processArguments(pid: pid)
+            let project = processWorkingDirectory(pid: pid).map { URL(fileURLWithPath: $0).lastPathComponent }
+            let tool: String
+            if fallback.hasPrefix("next-server") || args.contains(where: { $0 == "next" || $0.hasSuffix("/next") || $0.contains("next/dist") }) {
+                tool = "Next.js"
+            } else if args.contains(where: { $0 == "vite" || $0.hasSuffix("/vite") }) {
+                tool = "Vite"
+            } else {
+                tool = executable
+            }
+            if let project, !project.isEmpty {
+                return "\(tool) · \(project)"
+            }
+            return tool
+        }
+
+        // Helpers living inside an .app bundle: use the bundle's name.
+        if let range = path.range(of: ".app/") {
+            return URL(fileURLWithPath: String(path[..<range.lowerBound])).lastPathComponent
+        }
+
+        // Reverse-DNS daemon names: keep the last component, space out camel case.
+        if executable.contains(".") {
+            let last = executable.split(separator: ".").last.map(String.init) ?? executable
+            var spaced = ""
+            for character in last {
+                if character.isUppercase, let previous = spaced.last, previous.isLowercase {
+                    spaced.append(" ")
+                }
+                spaced.append(character)
+            }
+            return spaced
+        }
+
+        return executable
+    }
+
+    private static func processArguments(pid: pid_t) -> [String] {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return [] }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return [] }
+
+        let argc = Int(buffer.withUnsafeBytes { $0.load(as: Int32.self) })
+        var offset = MemoryLayout<Int32>.size
+        while offset < size, buffer[offset] != 0 { offset += 1 }  // skip exec path
+        while offset < size, buffer[offset] == 0 { offset += 1 }  // skip padding
+
+        var args: [String] = []
+        var current: [UInt8] = []
+        while offset < size, args.count < argc {
+            if buffer[offset] == 0 {
+                args.append(String(decoding: current, as: UTF8.self))
+                current = []
+            } else {
+                current.append(buffer[offset])
+            }
+            offset += 1
+        }
+        return args
+    }
+
+    private static func processWorkingDirectory(pid: pid_t) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.stride)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        return withUnsafeBytes(of: info.pvi_cdir.vip_path) { raw in
+            let bytes = raw.prefix(while: { $0 != 0 })
+            return bytes.isEmpty ? nil : String(decoding: bytes, as: UTF8.self)
+        }
+    }
+
+    private static func readSnapshot(pressure: MemoryPressure = .normal) -> MemorySnapshot {
         var stats = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
         let result = withUnsafeMutablePointer(to: &stats) {
@@ -50,15 +191,11 @@ final class MemoryMonitor: ObservableObject {
         }
 
         let pageSize = UInt64(getpagesize())
-        let usedPages = UInt64(stats.active_count) + UInt64(stats.inactive_count) + UInt64(stats.wire_count) + UInt64(stats.compressor_page_count)
-        let pressure: MemoryPressure
-        if pressureEvent.contains(.critical) {
-            pressure = .critical
-        } else if pressureEvent.contains(.warning) {
-            pressure = .warning
-        } else {
-            pressure = .normal
-        }
+        // Match Activity Monitor's "Memory Used": app memory (internal minus
+        // purgeable) + wired + compressed. Excludes reclaimable file cache,
+        // which macOS intentionally keeps large.
+        let appPages = UInt64(stats.internal_page_count) - min(UInt64(stats.internal_page_count), UInt64(stats.purgeable_count))
+        let usedPages = appPages + UInt64(stats.wire_count) + UInt64(stats.compressor_page_count)
         return MemorySnapshot(totalBytes: total, usedBytes: usedPages * pageSize, pressure: pressure)
     }
 }
@@ -85,12 +222,38 @@ struct MemoryMenuView: View {
             Text(statusText)
                 .font(.caption)
                 .foregroundStyle(color)
+            if !monitor.topProcesses.isEmpty {
+                Divider()
+                Text("Top memory consumers")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(monitor.topProcesses) { process in
+                    HStack(spacing: 8) {
+                        Text(process.name)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(process.bytes), countStyle: .memory))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                        Button {
+                            monitor.kill(process)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.red.opacity(0.8))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Force quit \(process.name) (PID \(process.pid))")
+                    }
+                }
+            }
             Divider()
             Button("Refresh now") { monitor.refresh() }
             Button("Quit RAM Gauge") { NSApplication.shared.terminate(nil) }
         }
         .padding(16)
-        .frame(width: 260)
+        .frame(width: 300)
     }
 
     private var color: Color {
@@ -118,7 +281,7 @@ struct RAMGaugeApp: App {
         MenuBarExtra {
             MemoryMenuView(monitor: monitor)
         } label: {
-            Text("\(monitor.snapshot.usagePercent)%")
+            Text("💻 \(monitor.snapshot.usagePercent)%")
                 .foregroundStyle(menuBarColor)
                 .monospacedDigit()
         }

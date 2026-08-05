@@ -10,6 +10,7 @@ A minimal macOS menu-bar app that shows used memory as a percentage of installed
 - Uses green, yellow, and red status coloring.
 - Refreshes every **5 seconds**, a good balance between freshness and negligible overhead.
 - Opens a small details panel when clicked: used RAM, total RAM, progress bar, and status.
+- Lists the top five memory consumers with readable names (Next.js dev servers show their project folder) and a kill button for each.
 - Runs as a menu-bar-only app, with no Dock icon.
 
 The color system considers both memory use and actual macOS memory-pressure events:
@@ -27,7 +28,7 @@ The color system considers both memory use and actual macOS memory-pressure even
 3. Double-click the ZIP, then drag `RAMGauge.app` into `/Applications`.
 4. Open the app. Its percentage appears in the right side of the menu bar.
 
-The app is ad-hoc signed, not notarized. If macOS blocks the first launch, Control-click `RAMGauge.app`, choose **Open**, then choose **Open** again.
+Releases are signed with a Developer ID certificate and notarized by Apple, so macOS opens them with no warnings.
 
 ## Build from source
 
