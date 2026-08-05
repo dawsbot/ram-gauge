@@ -4,6 +4,8 @@ A minimal macOS menu-bar app that shows used memory as a percentage of installed
 
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black)
 
+<img src="docs/screenshot.png" width="314" alt="RAM Gauge menu bar dropdown showing memory usage and top memory consumers with kill buttons">
+
 ## Install with AI
 
 Paste this into Claude (or any AI agent on your Mac):
