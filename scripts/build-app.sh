@@ -11,6 +11,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BINARY" "$APP/Contents/MacOS/RAMGauge"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources"
+cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Dawson Botsford (7M8FTZA845)}"
 codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
