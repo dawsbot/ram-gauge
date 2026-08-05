@@ -4,6 +4,14 @@ A minimal macOS menu-bar app that shows used memory as a percentage of installed
 
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black)
 
+## Install with AI
+
+Paste this into Claude (or any AI agent on your Mac):
+
+```text
+Install RAM Gauge for me: download https://github.com/dawsbot/ram-gauge/releases/latest/download/RAMGauge-macos.zip, unzip it, move RAMGauge.app into /Applications, open it, and confirm the 💻 percentage appears in my menu bar.
+```
+
 ## What it does
 
 - Shows a live **RAM-used percentage** in the macOS menu bar.
@@ -21,12 +29,11 @@ The color system considers both memory use and actual macOS memory-pressure even
 | Yellow | Elevated usage, or macOS warning pressure |
 | Red | Very high usage, or macOS critical pressure |
 
-## Install a release on another Mac
+## Install manually
 
-1. Open this private repository while signed into the authorized GitHub account.
-2. Download `RAMGauge-macos.zip` from **Releases**.
-3. Double-click the ZIP, then drag `RAMGauge.app` into `/Applications`.
-4. Open the app. Its percentage appears in the right side of the menu bar.
+1. Download `RAMGauge-macos.zip` from **Releases**.
+2. Double-click the ZIP, then drag `RAMGauge.app` into `/Applications`.
+3. Open the app. Its percentage appears in the right side of the menu bar.
 
 Releases are signed with a Developer ID certificate and notarized by Apple, so macOS opens them with no warnings.
 
